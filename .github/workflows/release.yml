@@ -1,0 +1,61 @@
+name: Release
+
+# Jeder Merge, der die Integration ändert, bekommt automatisch eine neue Version und ein GitHub-Release.
+# HACS zeigt das Release als Update an und installiert es.
+#   - Gibt es für die Version in manifest.json noch kein Release (v<version>), wird genau diese veröffentlicht.
+#   - Sonst wird die Patch-Nummer um eins erhöht (0.3.0 -> 0.3.1), in manifest.json eingetragen und veröffentlicht.
+# Für einen größeren Sprung die Version in manifest.json im Pull Request selbst erhöhen (z. B. 0.4.0).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "custom_components/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Version erhöhen und Release veröffentlichen
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Version bestimmen
+        id: v
+        run: |
+          manifest=custom_components/dusk_dawn/manifest.json
+          current=$(jq -r .version "$manifest")
+          if git rev-parse -q --verify "refs/tags/v$current" >/dev/null; then
+            top=$(printf '%s\n' "$current" $(git tag -l 'v*' | sed 's/^v//') | sort -V | tail -1)
+            new="${top%.*}.$(( ${top##*.} + 1 ))"
+          else
+            new="$current"
+          fi
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "bump=$([ "$new" != "$current" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - name: Version in manifest.json eintragen
+        if: steps.v.outputs.bump == 'yes'
+        run: |
+          manifest=custom_components/dusk_dawn/manifest.json
+          jq --arg v "${{ steps.v.outputs.new }}" '.version = $v' "$manifest" > /tmp/m.json
+          mv /tmp/m.json "$manifest"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$manifest"
+          git commit -m "Version ${{ steps.v.outputs.new }} [skip release]"
+          git push origin HEAD:main
+      - name: Release veröffentlichen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.v.outputs.new }}" --target "$(git rev-parse HEAD)" \
+            --title "v${{ steps.v.outputs.new }}" --generate-notes
